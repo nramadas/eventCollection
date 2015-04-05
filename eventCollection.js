@@ -3,10 +3,15 @@ window.EventCollection = (function() {
         /* private */
         var successMethods = [],
             errorMethods = [],
-            eventSuccessBuffer = [],
-            eventErrorBuffer = [];
+            disabled = false,
+            throttleInterval = null,
+            debounceInterval = null,
+            debounceTimer = null,
+            eventQueue = [];
 
-        if (!type) { type = "default"; }
+        if (!type) {
+            type = "default";
+        }
 
         var sendEvent = function(fnArray, event) {
             for(var i = 0; i < fnArray.length; i++) {
@@ -14,9 +19,56 @@ window.EventCollection = (function() {
             }
         }
 
+        var processEventQueue = function(newCollection) {
+            if (!eventQueue.length) {
+                return
+            }
+
+            var handleNextEvent = function() {
+                eventQueue.shift();
+                processEventQueue();
+            }
+
+            var processSuccess = function(event) {
+                newCollection.acceptEventSucess(event);
+                handleNextEvent();
+            }
+
+            var processError = function(event) {
+                newCollection.acceptEventError(event);
+                handleNextEvent();
+            }
+
+            var event = eventQueue[0];
+            if (event.type === "promise") {
+                event.event.done(processSuccess);
+                event.event.fail(processError);
+            } else {
+                processSuccess(event.event);
+            }
+        }
+
         /* priveledged */
         this.acceptEventSucess = function(event) {
-            sendEvent(successMethods, event);
+            runEvent = function() {
+                if (!disabled) {
+                    sendEvent(successMethods, event);
+
+                    if (throttleInterval) {
+                        disabled = true;
+                        setTimeout(function() {
+                            disabled = false;
+                        }, throttleInterval);
+                    }
+                }
+            }
+
+            if (debounceInterval) {
+                clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(runEvent, debounceInterval);
+            } else {
+                runEvent();
+            }
         }
 
         this.acceptEventError = function(event) {
@@ -25,16 +77,49 @@ window.EventCollection = (function() {
 
         this.forEach = function(successFn, errorFn) {
             successMethods.push(successFn);
-            if (errorFn) { errorMethods.push(errorFn); }
+            if (errorFn) {
+                errorMethods.push(errorFn);
+            }
         };
 
         this.inspect = function() {
             return {
                 successMethods: successMethods,
                 errorMethods: errorMethods,
-                eventSuccessBuffer: eventSuccessBuffer,
-                eventErrorBuffer: eventErrorBuffer
+                disabled: disabled,
+                throttleInterval: throttleInterval,
+                debounceInterval: debounceInterval,
+                debounceTimer: debounceTimer
             }
+        };
+
+        this.throttle = function(newThrottleInterval) {
+            throttleInterval = newThrottleInterval;
+            return this;
+        };
+
+        this.debounce = function(newDebounceInterval) {
+            debounceInterval = newDebounceInterval;
+            return this;
+        };
+
+        this.flatten = function() {
+            var newCollection = new Collection();
+            this.forEach(function(event) {
+                if(event instanceof Array) {
+                    for(var i = 0; i < event.length; i++) {
+                        eventQueue.push({type: "default", event: event[i]});
+                    }
+                } else if (event instanceof Collection) {
+                    var d = $.Deferred();
+                    event.forEach(d.resolve, d.reject);
+                    eventQueue.push({type: "promise", event: d.promise()});
+                } else {
+                    eventQueue.push({type: "default", event: event});
+                }
+                processEventQueue(newCollection);
+            });
+            return newCollection;
         };
     };
 
@@ -46,7 +131,9 @@ window.EventCollection = (function() {
             newCollection.acceptEventSucess(successFn(event));
         }, function(event) {
             /* handle an error event */
-            if(errorFn) { newCollection.acceptEventError(errorFn(event)); }
+            if(errorFn) {
+                newCollection.acceptEventError(errorFn(event));
+            }
         });
         return newCollection;
     };
@@ -55,42 +142,26 @@ window.EventCollection = (function() {
         var newCollection = new Collection();
         this.forEach(function(event) {
             /* handle a successful event */
-            if(successFn(event)) { newCollection.acceptEventSucess(event); }
+            if(successFn(event)) {
+                newCollection.acceptEventSucess(event);
+            }
         }, function(event) {
             /* handle an error event */
-            if(errorFn) { newCollection.acceptEventError(event); }
-        });
-        return newCollection;
-    };
-
-    Collection.prototype.flatten = function() {
-        var newCollection = new Collection();
-        this.forEach(function(event) {
-            /* flatten all successful events */
-            if(event instanceof Array) {
-                for(var i = 0; i < event.length; i++) {
-                    newCollection.acceptEventSucess(event[i]);
-                }
-            } else if (event instanceof Collection) {
-                event.forEach(function(event) {
-                    newCollection.acceptEventSucess(event);
-                }, function(event) {
-                    newCollection.acceptEventError(event);
-                });
-            } else {
-                newCollection.acceptEventSucess(event);
+            if(errorFn) {
+                newCollection.acceptEventError(event);
             }
         });
         return newCollection;
-    }
-
+    };
 
     return {
         createFromDomEvent: function($domElement, action, selector) {
             var collection = new Collection();
             var handlerArgs = [];
             handlerArgs.push(action);
-            if(selector) { handlerArgs.push(selector); }
+            if(selector) {
+                handlerArgs.push(selector);
+            }
             handlerArgs.push(function(event) {
                 collection.acceptEventSucess(event);
             });
@@ -106,23 +177,7 @@ window.EventCollection = (function() {
             ajaxCall.fail(function(error) {
                 collection.acceptEventError(error);
             });
-            ajaxCall.always(function() {
-                collection.complete();
-            });
             return collection;
         }
     }
 })();
-
-var s = EventCollection.createFromDomEvent($(document), "click");
-
-s.map(function(event) {
-    return {x: event.offsetX, y: event.offsetY};
-}).filter(function(event) {
-    return event.x > 500;
-}).map(function(event) {
-    return EventCollection.createFromAjax($.ajax({url: "/grapes.jpg"}));
-}).flatten().forEach(function(event) {
-    console.log(event);
-});
-
